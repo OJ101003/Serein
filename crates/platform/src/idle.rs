@@ -1,10 +1,117 @@
 use std::time::Duration;
 
-/// Time since the last keyboard/mouse input anywhere on the system, or `None` when this
-/// desktop exposes no idle source. Blocking; call off the UI thread and async runtime.
+/// Time since the last keyboard/mouse input anywhere on the system, `Duration::MAX` while the
+/// session is locked, or `None` when this desktop exposes no idle source. Blocking; call off
+/// the UI thread and async runtime.
+pub fn system_idle() -> Option<Duration> {
+	if session_locked() {
+		return Some(Duration::MAX);
+	}
+	input_idle()
+}
+
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
-pub fn system_idle() -> Option<Duration> {
+fn session_locked() -> bool {
+	use windows::{
+		Win32::System::RemoteDesktop::{
+			WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK, WTSFreeMemory,
+			WTSINFOEXW, WTSQuerySessionInformationW, WTSSessionInfoEx,
+		},
+		core::PWSTR,
+	};
+	let mut buffer = PWSTR::null();
+	let mut len = 0;
+	// SAFETY: the call fills `buffer` with a WTS allocation of `len` bytes; it is read only
+	// when large enough for WTSINFOEXW (unaligned, in case) and always freed.
+	unsafe {
+		let queried = WTSQuerySessionInformationW(
+			Some(WTS_CURRENT_SERVER_HANDLE),
+			WTS_CURRENT_SESSION,
+			WTSSessionInfoEx,
+			&mut buffer,
+			&mut len,
+		);
+		if queried.is_err() || buffer.is_null() {
+			return false;
+		}
+		let locked = len as usize >= size_of::<WTSINFOEXW>() && {
+			let info = buffer.0.cast::<WTSINFOEXW>().read_unaligned();
+			info.Level == 1
+				&& info.Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK as i32
+		};
+		WTSFreeMemory(buffer.0.cast());
+		locked
+	}
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn session_locked() -> bool {
+	use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
+	use std::ptr::NonNull;
+	#[link(name = "CoreGraphics", kind = "framework")]
+	unsafe extern "C" {
+		fn CGSessionCopyCurrentDictionary() -> Option<NonNull<CFDictionary<CFString, CFType>>>;
+	}
+	// SAFETY: the "Copy" function returns a +1 retained dictionary or null; CFRetained takes
+	// ownership and releases it.
+	let Some(session) = (unsafe { CGSessionCopyCurrentDictionary() })
+		.map(|session| unsafe { CFRetained::from_raw(session) })
+	else {
+		return false;
+	};
+	session
+		.get(&CFString::from_static_str("CGSSessionScreenIsLocked"))
+		.and_then(|locked| locked.downcast_ref::<CFBoolean>().map(CFBoolean::value))
+		.unwrap_or(false)
+}
+
+/// logind's `LockedHint` covers GNOME, KDE and most lockers; the ScreenSaver service is the
+/// fallback where logind or the hint is unavailable.
+#[cfg(target_os = "linux")]
+fn session_locked() -> bool {
+	use zbus::zvariant::Value;
+	bus(true)
+		.and_then(|bus| {
+			bus.call_method(
+				Some("org.freedesktop.login1"),
+				"/org/freedesktop/login1/session/auto",
+				Some("org.freedesktop.DBus.Properties"),
+				"Get",
+				&("org.freedesktop.login1.Session", "LockedHint"),
+			)
+			.ok()
+		})
+		.and_then(|reply| match reply.body().deserialize::<Value>() {
+			Ok(Value::Bool(locked)) => Some(locked),
+			_ => None,
+		})
+		.or_else(|| {
+			bus(false)?
+				.call_method(
+					Some("org.freedesktop.ScreenSaver"),
+					"/org/freedesktop/ScreenSaver",
+					Some("org.freedesktop.ScreenSaver"),
+					"GetActive",
+					&(),
+				)
+				.ok()?
+				.body()
+				.deserialize::<bool>()
+				.ok()
+		})
+		.unwrap_or(false)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn session_locked() -> bool {
+	false
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn input_idle() -> Option<Duration> {
 	use windows::Win32::{
 		System::SystemInformation::GetTickCount,
 		UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
@@ -29,7 +136,7 @@ pub fn system_idle() -> Option<Duration> {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-pub fn system_idle() -> Option<Duration> {
+fn input_idle() -> Option<Duration> {
 	#[link(name = "CoreGraphics", kind = "framework")]
 	unsafe extern "C" {
 		fn CGEventSourceSecondsSinceLastEventType(state: i32, event: u32) -> f64;
@@ -41,7 +148,7 @@ pub fn system_idle() -> Option<Duration> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn system_idle() -> Option<Duration> {
+fn input_idle() -> Option<Duration> {
 	session_bus_idle(
 		"org.gnome.Mutter.IdleMonitor",
 		"/org/gnome/Mutter/IdleMonitor/Core",
@@ -174,6 +281,31 @@ mod wayland {
 	delegate_noop!(State: ignore ExtIdleNotifierV1);
 }
 
+/// Cached D-Bus connections, built with a call timeout (zbus waits forever by default, and a
+/// hung service must not freeze the poller). Only a successful connection is cached.
+#[cfg(target_os = "linux")]
+fn bus(system: bool) -> Option<&'static zbus::blocking::Connection> {
+	use std::sync::OnceLock;
+	use zbus::blocking::{Connection, connection::Builder};
+	static SESSION: OnceLock<Connection> = OnceLock::new();
+	static SYSTEM: OnceLock<Connection> = OnceLock::new();
+	let cell = if system { &SYSTEM } else { &SESSION };
+	if let Some(bus) = cell.get() {
+		return Some(bus);
+	}
+	let builder = if system {
+		Builder::system()
+	} else {
+		Builder::session()
+	};
+	let connection = builder
+		.ok()?
+		.method_timeout(Duration::from_secs(2))
+		.build()
+		.ok()?;
+	Some(cell.get_or_init(move || connection))
+}
+
 /// Both D-Bus idle services answer in milliseconds; Mutter as u64, KDE as u32.
 #[cfg(target_os = "linux")]
 fn session_bus_idle(
@@ -182,21 +314,7 @@ fn session_bus_idle(
 	interface: &'static str,
 	method: &'static str,
 ) -> Option<Duration> {
-	use std::sync::OnceLock;
-	static BUS: OnceLock<zbus::blocking::Connection> = OnceLock::new();
-	let bus = match BUS.get() {
-		Some(bus) => bus,
-		None => BUS.get_or_init({
-			// zbus waits forever by default; a hung service must not freeze the poller.
-			let connection = zbus::blocking::connection::Builder::session()
-				.ok()?
-				.method_timeout(Duration::from_secs(2))
-				.build()
-				.ok()?;
-			move || connection
-		}),
-	};
-	let reply = bus
+	let reply = bus(false)?
 		.call_method(Some(destination), path, Some(interface), method, &())
 		.ok()?;
 	let body = reply.body();
@@ -243,6 +361,6 @@ fn x11_idle() -> Option<Duration> {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-pub fn system_idle() -> Option<Duration> {
+fn input_idle() -> Option<Duration> {
 	None
 }
