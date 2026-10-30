@@ -517,6 +517,8 @@ pub struct MessagingUi {
 	pub notifications_enabled: bool,
 	/// Show as Idle after 10 minutes of system inactivity.
 	pub auto_idle: bool,
+	/// Set while system inactivity shows this session as Idle; display only, never saved.
+	pub auto_idle_active: bool,
 	pub notification_options: model::notification_preferences::Device,
 	pub notification_preview: Option<model::notification_preferences::Sound>,
 	pub notification_sound_status: &'static str,
@@ -2180,7 +2182,7 @@ impl MessagingUi {
 								design::presence_dot(
 									ui,
 									avatar.rect,
-									self.own_presence.status.wire(),
+									self.shown_presence_status().wire(),
 									ring,
 								);
 								anchor =
@@ -2251,7 +2253,7 @@ impl MessagingUi {
 																} else if state.demo {
 																	language.text("offline-preview")
 																} else if state.gateway_connected {
-																	language.text(account_menu::presence_status_key(self.own_presence.status))
+																	language.text(account_menu::presence_status_key(self.shown_presence_status()))
 																} else {
 																	language.text("reconnecting")
 																},

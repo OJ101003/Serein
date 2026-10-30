@@ -126,10 +126,13 @@ Real Linux desktop/portal rendering is unverified in this macOS repair session.
 The Notifications setting shows Idle after 10 minutes without system-wide
 keyboard or mouse input, so Discord can send notifications to the phone. Input
 age comes from `GetLastInputInfo` on Windows and CoreGraphics on macOS. On Linux
-Serein asks GNOME Mutter's IdleMonitor, then `org.freedesktop.ScreenSaver`
-(KDE), then X11 XScreenSaver; XScreenSaver is skipped under Wayland, where other
-compositors stay online. The check runs every 15 seconds off the UI thread.
-macOS and Linux behavior is unverified on a live session.
+Serein asks GNOME Mutter's IdleMonitor, then the Wayland `ext-idle-notify-v1`
+protocol (KDE Plasma, wlroots compositors, COSMIC), then
+`org.freedesktop.ScreenSaver` (KDE on X11), then X11 XScreenSaver, which is
+skipped under Wayland. Wayland compositors with none of these stay online, and
+idle inhibitors such as video playback keep the session active. The check runs
+every 15 seconds off the UI thread. Serein also shows your own status as Idle
+while it applies. macOS and Linux behavior is unverified on a live session.
 
 ## Window transparency and blur
 

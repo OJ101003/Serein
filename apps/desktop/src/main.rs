@@ -5344,6 +5344,10 @@ impl eframe::App for Desktop {
 				.auto_idle
 				.send_if_modified(|current| std::mem::replace(current, enabled) != enabled);
 		}
+		self.messaging.auto_idle_active = self
+			.connection
+			.as_ref()
+			.is_some_and(|connection| *connection.afk.borrow());
 		self.sync_fonts(ctx);
 		self.hotkeys.sync(&self.messaging.keybinds, &self.runtime);
 		self.messaging.global_keybind_status = self.hotkeys.status();
