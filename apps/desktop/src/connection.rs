@@ -29,8 +29,16 @@ pub struct Connection {
 	pub share_activity: watch::Sender<bool>,
 	pub custom_rich_presence: watch::Sender<Option<extensions::CustomRichPresence>>,
 	pub own_presence: watch::Sender<model::OwnPresence>,
-	/// Owner's Go-idle-when-away setting; a poller turns system inactivity into gateway afk.
-	pub auto_idle: watch::Sender<bool>,
+	/// Idle-after timeout while Go idle when away applies (`None`: off or in a call); a poller
+	/// turns system inactivity into gateway afk.
+	pub auto_idle: watch::Sender<Option<Duration>>,
+	/// The account's idle timeout in seconds (default when unset), sent once it is read at connect.
+	pub idle_timeout: watch::Receiver<Option<u32>>,
+	/// Owner edits of the timeout, written to the account.
+	pub idle_timeout_edits: watch::Sender<Option<u32>>,
+	pub idle_timeout_error: watch::Receiver<Option<&'static str>>,
+	/// Last value known to match the account; `None` until it was read on this connection.
+	pub idle_timeout_synced: Option<u32>,
 	/// Whether system inactivity currently shows this session as Idle.
 	pub afk: watch::Receiver<bool>,
 	/// Local edits only. Seeding from Discord does not publish through this watch.
@@ -96,11 +104,11 @@ impl Drop for Connection {
 		self.task.abort();
 	}
 }
-const IDLE_POLL: Duration = Duration::from_secs(15);
-const IDLE_AFTER: Duration = Duration::from_secs(10 * 60);
+/// Short enough that locking the screen shows as Idle within about this long.
+const IDLE_POLL: Duration = Duration::from_secs(5);
 /// Publishes whether the system has been idle long enough to show as Idle; ends with the connection.
 async fn run_auto_idle(
-	mut enabled: watch::Receiver<bool>,
+	mut enabled: watch::Receiver<Option<Duration>>,
 	afk: watch::Sender<bool>,
 	wake: egui::Context,
 ) {
@@ -112,7 +120,8 @@ async fn run_auto_idle(
 			_ = tick.tick() => {}
 			changed = enabled.changed() => if changed.is_err() { return; }
 		}
-		let idle = if *enabled.borrow() {
+		let timeout = *enabled.borrow();
+		let idle = if timeout.is_some() {
 			let pending = query
 				.get_or_insert_with(|| tokio::task::spawn_blocking(platform::idle::system_idle));
 			// Turning the setting off still clears afk while a query is stuck.
@@ -126,7 +135,10 @@ async fn run_auto_idle(
 		} else {
 			None
 		};
-		let away = idle.is_some_and(|idle| idle >= IDLE_AFTER);
+		// A locked screen reports `Duration::MAX`, which is away for any timeout.
+		let away = timeout
+			.zip(idle)
+			.is_some_and(|(timeout, idle)| idle >= timeout);
 		if afk.send_if_modified(|current| std::mem::replace(current, away) != away) {
 			wake.request_repaint();
 		}
@@ -205,7 +217,10 @@ impl Connection {
 		let (share_activity, share_receive) = watch::channel(false);
 		let (custom_rich_presence, custom_receive) = watch::channel(None);
 		let (own_presence, presence_receive) = watch::channel(model::OwnPresence::default());
-		let (auto_idle, auto_idle_receive) = watch::channel(false);
+		let (auto_idle, auto_idle_receive) = watch::channel(None);
+		let (idle_timeout_send, idle_timeout) = watch::channel(None);
+		let (idle_timeout_edits, idle_timeout_edit_events) = watch::channel(None);
+		let (idle_timeout_error_send, idle_timeout_error) = watch::channel(None);
 		let (afk, afk_receive) = watch::channel(false);
 		let afk_display = afk_receive.clone();
 		let (presence_edits, presence_edit_events) = watch::channel(None);
@@ -257,7 +272,13 @@ impl Connection {
 					finished: finished.clone(),
 					wake: wake.clone(),
 				})));
-				let chosen = resolve_account_presence(&api, &presence_send, cached).await;
+				let chosen = resolve_account_presence(&api, &presence_send, cached, &idle_timeout_send).await;
+				let _idle_timeout_task = AbortTask(tokio::spawn(run_idle_timeout_sync(
+					api.clone(),
+					idle_timeout_edit_events,
+					idle_timeout_error_send,
+					wake.clone(),
+				)));
 				if chosen.is_some() {
 					wake.request_repaint();
 				}
@@ -747,6 +768,10 @@ impl Connection {
 			share_activity,
 			own_presence,
 			auto_idle,
+			idle_timeout,
+			idle_timeout_edits,
+			idle_timeout_error,
+			idle_timeout_synced: None,
 			afk: afk_display,
 			presence_edits,
 			account_presence,
@@ -772,12 +797,17 @@ async fn resolve_account_presence(
 	api: &DiscordApi,
 	presence: &watch::Sender<model::OwnPresence>,
 	cached: Option<model::OwnPresence>,
+	idle_timeout: &watch::Sender<Option<u32>>,
 ) -> Option<model::OwnPresence> {
 	let baseline = presence.borrow().clone();
-	let remote = tokio::time::timeout(Duration::from_secs(8), api.account_presence())
+	let remote = tokio::time::timeout(Duration::from_secs(8), api.account_status())
 		.await
 		.ok()
-		.and_then(Result::ok);
+		.and_then(Result::ok)
+		.map(|(presence, timeout)| {
+			idle_timeout.send_replace(Some(timeout.unwrap_or(ui::DEFAULT_IDLE_TIMEOUT_SECS)));
+			presence
+		});
 	let edited = presence.borrow().clone() != baseline;
 	if !edited && (remote.is_some() || cached.is_some()) {
 		let chosen = remote.clone().or(cached.clone()).unwrap_or_default();
@@ -792,6 +822,29 @@ async fn resolve_account_presence(
 	}
 	let current = presence.borrow().clone();
 	(remote.is_some() || cached.is_some() || current != baseline).then_some(current)
+}
+
+/// Writes owner edits of the idle timeout, newest wins. No retry loop: a failure shows a hint
+/// and the next edit or reconnect tries again.
+async fn run_idle_timeout_sync(
+	api: Arc<DiscordApi>,
+	mut edits: watch::Receiver<Option<u32>>,
+	note: watch::Sender<Option<&'static str>>,
+	wake: egui::Context,
+) {
+	while edits.changed().await.is_ok() {
+		let Some(secs) = *edits.borrow_and_update() else {
+			continue;
+		};
+		let hint = api
+			.set_idle_timeout(secs)
+			.await
+			.err()
+			.map(|_| "Could not save the idle timeout to Discord.");
+		if note.send_replace(hint) != hint {
+			wake.request_repaint();
+		}
+	}
 }
 
 struct PresenceSync {

@@ -4648,7 +4648,13 @@ settings-convert-emoticons-description = Convert standalone emoticons such as :)
 settings-preload-on-hover = Preload on hover
 settings-preload-on-hover-description = Load a conversation, a profile or the GIF picker while the pointer rests on it, so it opens instantly. Uses the same requests as opening it, at most 12 per minute for each kind.
 settings-auto-idle = Go idle when away
-settings-auto-idle-description = After 10 minutes without keyboard or mouse input, show as Idle so Discord can send notifications to your phone.
+settings-auto-idle-description = Show as Idle after the time below without keyboard or mouse input, or right away when you lock your computer. Not during voice calls.
+settings-idle-after = Idle after
+settings-idle-after-minutes =
+    { $count ->
+        [one] { $count } minute
+       *[other] { $count } minutes
+    }
 
 profiles-board = Board
 profiles-board-unavailable = This profile’s board is unavailable.
