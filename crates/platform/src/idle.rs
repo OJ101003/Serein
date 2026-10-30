@@ -94,6 +94,8 @@ fn session_bus_idle(
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
+// `c_ulong` is u64 here but u32 on 32-bit Linux, where the conversion is needed.
+#[allow(clippy::useless_conversion)]
 fn x11_idle() -> Option<Duration> {
 	use x11_dl::{xlib, xss};
 	// XWayland only sees X clients, so it would report native Wayland input as idle.
