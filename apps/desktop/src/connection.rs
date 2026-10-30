@@ -29,6 +29,8 @@ pub struct Connection {
 	pub share_activity: watch::Sender<bool>,
 	pub custom_rich_presence: watch::Sender<Option<extensions::CustomRichPresence>>,
 	pub own_presence: watch::Sender<model::OwnPresence>,
+	/// Owner's Go-idle-when-away setting; a poller turns system inactivity into gateway afk.
+	pub auto_idle: watch::Sender<bool>,
 	/// Local edits only. Seeding from Discord does not publish through this watch.
 	pub presence_edits: watch::Sender<Option<model::OwnPresence>>,
 	/// The status chosen for this connection, once Discord or the local fallback is known.
@@ -90,6 +92,29 @@ pub fn take_confirmation_failure(
 impl Drop for Connection {
 	fn drop(&mut self) {
 		self.task.abort();
+	}
+}
+const IDLE_POLL: Duration = Duration::from_secs(15);
+const IDLE_AFTER: Duration = Duration::from_secs(10 * 60);
+/// Publishes whether the system has been idle long enough to show as Idle; ends with the connection.
+async fn run_auto_idle(mut enabled: watch::Receiver<bool>, afk: watch::Sender<bool>) {
+	let mut tick = tokio::time::interval(IDLE_POLL);
+	loop {
+		tokio::select! {
+			_ = tick.tick() => {}
+			changed = enabled.changed() => if changed.is_err() { return; }
+		}
+		let on = *enabled.borrow();
+		let idle = if on {
+			tokio::task::spawn_blocking(platform::idle::system_idle)
+				.await
+				.ok()
+				.flatten()
+		} else {
+			None
+		};
+		let away = idle.is_some_and(|idle| idle >= IDLE_AFTER);
+		afk.send_if_modified(|current| std::mem::replace(current, away) != away);
 	}
 }
 /// Preload tasks kept at once: one per preload kind, plus room for one whose result was lost.
@@ -165,6 +190,8 @@ impl Connection {
 		let (share_activity, share_receive) = watch::channel(false);
 		let (custom_rich_presence, custom_receive) = watch::channel(None);
 		let (own_presence, presence_receive) = watch::channel(model::OwnPresence::default());
+		let (auto_idle, auto_idle_receive) = watch::channel(false);
+		let (afk, afk_receive) = watch::channel(false);
 		let (presence_edits, presence_edit_events) = watch::channel(None);
 		let (account_presence_send, account_presence) = watch::channel(None);
 		let (presence_error_send, presence_error) = watch::channel(None);
@@ -227,6 +254,7 @@ impl Connection {
 				let _sharing_task=AbortTask(tokio::spawn(run_activity_sharing(api.clone(),share_receive.clone(),sharing_requests,sharing_report,finished.clone(),wake.clone())));
 				let _activity_task=AbortTask(tokio::spawn(crate::game_activity::run((share_receive,custom_receive,crate::game_activity::Registered{games:registered_receive,current:running_send}),activity_send,game_report,invite_send,wake.clone(),user.clone(),api.clone())));
 				let _spotify_task=AbortTask(tokio::spawn(crate::spotify::run(api.clone(),user.id,presence_receive.clone(),spotify_send,wake.clone())));
+				let _idle_task=AbortTask(tokio::spawn(run_auto_idle(auto_idle_receive,afk)));
                 let dm_channels=Arc::new(Mutex::new(BTreeMap::new()));
                 let (recipient_scope,mut recipient_scope_changed)=watch::channel(0u64);
                 let recipient_call=Arc::new(Mutex::new(RecipientCalls::default()));
@@ -239,7 +267,7 @@ impl Connection {
                 let gateway_wake=wake.clone();
                 let activity_wake=wake.clone();
                 let mut gateway_task=AbortTask(tokio::spawn(async move {
-                    let error=discord_gateway::run_with_activity_recovery(secret,gateway,member_receive,voice_receive,gateway_reconnect,(activity_receive,presence_receive,member_query_receive,spotify_receive),move |observation| {
+                    let error=discord_gateway::run_with_activity_recovery(secret,gateway,member_receive,voice_receive,gateway_reconnect,(activity_receive,presence_receive,member_query_receive,spotify_receive,afk_receive),move |observation| {
                         if activity_observed.send_if_modified(|current| { if *current == observation { false } else { *current = observation; true } }) { activity_wake.request_repaint(); }
                         Ok(())
                     },|event|{
@@ -702,6 +730,7 @@ impl Connection {
 			confirmation_failure,
 			share_activity,
 			own_presence,
+			auto_idle,
 			presence_edits,
 			account_presence,
 			presence_error,

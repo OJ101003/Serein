@@ -4647,6 +4647,8 @@ settings-convert-emoticons = Automatically convert emoticons in your messages to
 settings-convert-emoticons-description = Convert standalone emoticons such as :) to 🙂 when sending or editing messages. Code and links stay unchanged.
 settings-preload-on-hover = Preload on hover
 settings-preload-on-hover-description = Load a conversation, a profile or the GIF picker while the pointer rests on it, so it opens instantly. Uses the same requests as opening it, at most 12 per minute for each kind.
+settings-auto-idle = Go idle when away
+settings-auto-idle-description = After 10 minutes without keyboard or mouse input, show as Idle so Discord can send notifications to your phone.
 
 profiles-board = Board
 profiles-board-unavailable = This profile’s board is unavailable.

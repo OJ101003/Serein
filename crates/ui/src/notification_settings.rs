@@ -200,6 +200,13 @@ impl MessagingUi {
 			if !demo && !self.notification_status.is_empty() {
 				design::hint(ui, self.notification_status);
 			}
+			design::card_divider(ui);
+			design::switch(
+				ui,
+				"settings-auto-idle",
+				Some("settings-auto-idle-description"),
+				&mut self.auto_idle,
+			);
 		});
 		self.settings.notifications.heading(ui, Tab::Sounds);
 		design::card(ui, |ui| {

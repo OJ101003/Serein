@@ -2882,6 +2882,12 @@ impl Desktop {
 		if changed {
 			self.presence_authoritative = true;
 		}
+		if let Some(connection) = &self.connection {
+			let enabled = self.messaging.auto_idle;
+			connection
+				.auto_idle
+				.send_if_modified(|current| std::mem::replace(current, enabled) != enabled);
+		}
 		let published = self.presence_snapshot();
 		let previous_status = self.messaging.own_presence_status;
 		self.messaging.own_presence_status = if !published.valid() {

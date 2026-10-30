@@ -1605,7 +1605,10 @@ are shared across the session's metadata lookups. Unresolved artwork is
 omitted and application-name lookup failures are visible. These routes and normal-user Gateway
 publication remain unofficial/unstable. The existing [Update Presence](https://docs.discord.com/developers/events/gateway-events#update-presence)
 path waits for READY/RESUMED, coalesces updates and limits attempts (including clears) to one
-per five seconds. The Gateway payload retains the existing online/afk/since behavior.
+per five seconds. After system inactivity, Serein sends `afk: true` with `since` set to when
+inactivity began and shows Online as `idle` (DND, Invisible and manual Idle stay as chosen; the
+saved status is unchanged) so Discord can route push notifications to the phone. This mirrors the
+official client and is unofficial/unverified.
 
 Offline tests cover native Windows IPC, malformed/oversized frames, handshake/update/clear,
 unsupported subscriptions, shutdown, rich Gateway fields, rate spacing and reconnect.

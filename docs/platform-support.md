@@ -121,6 +121,16 @@ selects Dark; no preference selects Light. If detection fails entirely, the
 existing Dark fallback remains. Windows/macOS retain winit's system theme events.
 Real Linux desktop/portal rendering is unverified in this macOS repair session.
 
+## Go idle when away
+
+The Notifications setting shows Idle after 10 minutes without system-wide
+keyboard or mouse input, so Discord can send notifications to the phone. Input
+age comes from `GetLastInputInfo` on Windows and CoreGraphics on macOS. On Linux
+Serein asks GNOME Mutter's IdleMonitor, then `org.freedesktop.ScreenSaver`
+(KDE), then X11 XScreenSaver; XScreenSaver is skipped under Wayland, where other
+compositors stay online. The check runs every 15 seconds off the UI thread.
+macOS and Linux behavior is unverified on a live session.
+
 ## Window transparency and blur
 
 Enable Transparency & blur in Appearance and restart to create an alpha-capable
