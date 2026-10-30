@@ -1606,7 +1606,7 @@ omitted and application-name lookup failures are visible. These routes and norma
 publication remain unofficial/unstable. The existing [Update Presence](https://docs.discord.com/developers/events/gateway-events#update-presence)
 path waits for READY/RESUMED, coalesces updates and limits attempts (including clears) to one
 per five seconds. After system inactivity, Serein sends `afk: true` with `since` set to when
-inactivity began and shows Online as `idle` (DND, Invisible and manual Idle stay as chosen; the
+it marked the session idle and shows Online as `idle` (DND, Invisible and manual Idle stay as chosen; the
 saved status is unchanged) so Discord can route push notifications to the phone. This mirrors the
 official client and is unofficial/unverified.
 
