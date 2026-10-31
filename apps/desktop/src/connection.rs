@@ -111,26 +111,35 @@ async fn run_auto_idle(
 	mut enabled: watch::Receiver<Option<Duration>>,
 	afk: watch::Sender<bool>,
 	wake: egui::Context,
+	sample_idle: impl Fn() -> Option<Duration> + Clone + Send + 'static,
 ) {
 	let mut tick = tokio::time::interval(IDLE_POLL);
 	// One query at a time: a stuck OS query must not pile up blocking threads.
 	let mut query: Option<tokio::task::JoinHandle<Option<Duration>>> = None;
+	let mut stale = false;
 	loop {
 		tokio::select! {
 			_ = tick.tick() => {}
-			changed = enabled.changed() => if changed.is_err() { return; }
+			changed = enabled.changed() => {
+				if changed.is_err() { return; }
+				stale = query.is_some();
+			}
 		}
 		let timeout = *enabled.borrow();
 		let idle = if timeout.is_some() {
-			let pending = query
-				.get_or_insert_with(|| tokio::task::spawn_blocking(platform::idle::system_idle));
+			let pending =
+				query.get_or_insert_with(|| tokio::task::spawn_blocking(sample_idle.clone()));
 			// Turning the setting off still clears afk while a query is stuck.
 			tokio::select! {
 				result = pending => {
 					query = None;
-					result.ok().flatten()
+					if std::mem::take(&mut stale) { None } else { result.ok().flatten() }
 				}
-				changed = enabled.changed() => if changed.is_err() { return; } else { None }
+				changed = enabled.changed() => {
+					if changed.is_err() { return; }
+					stale = true;
+					None
+				}
 			}
 		} else {
 			None
@@ -291,7 +300,7 @@ impl Connection {
 				let _sharing_task=AbortTask(tokio::spawn(run_activity_sharing(api.clone(),share_receive.clone(),sharing_requests,sharing_report,finished.clone(),wake.clone())));
 				let _activity_task=AbortTask(tokio::spawn(crate::game_activity::run((share_receive,custom_receive,crate::game_activity::Registered{games:registered_receive,current:running_send}),activity_send,game_report,invite_send,wake.clone(),user.clone(),api.clone())));
 				let _spotify_task=AbortTask(tokio::spawn(crate::spotify::run(api.clone(),user.id,presence_receive.clone(),spotify_send,wake.clone())));
-				let _idle_task=AbortTask(tokio::spawn(run_auto_idle(auto_idle_receive,afk,wake.clone())));
+				let _idle_task=AbortTask(tokio::spawn(run_auto_idle(auto_idle_receive,afk,wake.clone(),platform::idle::system_idle)));
                 let dm_channels=Arc::new(Mutex::new(BTreeMap::new()));
                 let (recipient_scope,mut recipient_scope_changed)=watch::channel(0u64);
                 let recipient_call=Arc::new(Mutex::new(RecipientCalls::default()));
@@ -1810,6 +1819,61 @@ fn scope_history_failure(event: Event, channel: model::Id, request: u64) -> Even
 
 #[cfg(test)]
 mod tests {
+	#[tokio::test]
+	async fn auto_idle_discards_inflight_samples_after_a_setting_change() {
+		let (enabled, settings) = watch::channel(Some(Duration::from_secs(60)));
+		let (afk, mut observed) = watch::channel(false);
+		let (queries, mut pending) = tokio::sync::mpsc::channel(1);
+		let sample = move || {
+			let (answer, receive) = std::sync::mpsc::sync_channel(1);
+			queries.blocking_send(answer).ok()?;
+			receive.recv().ok().flatten()
+		};
+		let task = tokio::spawn(run_auto_idle(
+			settings,
+			afk,
+			egui::Context::default(),
+			sample,
+		));
+		let first = tokio::time::timeout(IDLE_POLL, pending.recv())
+			.await
+			.unwrap()
+			.unwrap();
+		first.send(Some(Duration::MAX)).unwrap();
+		tokio::time::timeout(IDLE_POLL, observed.changed())
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(*observed.borrow_and_update());
+		enabled.send(Some(Duration::from_secs(120))).unwrap();
+		let stale = tokio::time::timeout(IDLE_POLL, pending.recv())
+			.await
+			.unwrap()
+			.unwrap();
+		enabled.send(None).unwrap();
+		tokio::time::timeout(IDLE_POLL, observed.changed())
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(!*observed.borrow_and_update());
+		enabled.send(Some(Duration::from_secs(60))).unwrap();
+		stale.send(Some(Duration::MAX)).unwrap();
+		let fresh = tokio::time::timeout(IDLE_POLL * 2, pending.recv())
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(
+			!*observed.borrow(),
+			"the old query must not restore AFK after re-enabling"
+		);
+		fresh.send(Some(Duration::ZERO)).unwrap();
+		drop(enabled);
+		tokio::time::timeout(IDLE_POLL, task)
+			.await
+			.unwrap()
+			.unwrap();
+	}
+
 	#[tokio::test]
 	async fn full_prefetch_pool_rejects_new_reads_without_aborting_accepted_work() {
 		let mut tasks: Vec<_> = (0..PREFETCHES)

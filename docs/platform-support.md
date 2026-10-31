@@ -138,7 +138,12 @@ dictionary on macOS, and logind's `LockedHint` (then the ScreenSaver service's
 within about that long. The timeout is read when Serein connects and saved to
 the account when changed here; edits from another device apply on the next
 connect. Serein also shows your own status as Idle while it applies. macOS and
-Linux behavior is unverified on a live session.
+Linux behavior is unverified on a live session. A setting change invalidates an
+in-flight idle sample; its result is discarded before another query starts.
+The poller retains one blocking query at a time. A stalled Linux bus handshake,
+Wayland roundtrip or X11 query can stop idle detection without accumulating
+workers; the setting can still clear AFK. Wayland currently observes one seat,
+so activity on other seats in a multi-seat session is not included.
 
 ## Window transparency and blur
 
