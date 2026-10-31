@@ -68,11 +68,8 @@ pub fn decode_response(bytes: &[u8]) -> Result<Settings, DecodeError> {
 				if voice.is_some() {
 					return Err(DecodeError);
 				}
-				let value = field.message()?;
-				if value.len() > MAX_STATUS_BYTES {
-					return Err(DecodeError);
-				}
-				voice = Some(value);
+				// Bounded by MAX_SETTINGS_RESPONSE; a cap here would fail every settings read.
+				voice = Some(field.message()?);
 			}
 			11 => {
 				if status.is_some() {
@@ -422,6 +419,16 @@ mod tests {
 			decode_response(&response(&with_timeout))
 				.unwrap()
 				.afk_timeout,
+			Some(900)
+		);
+		// A large voice_and_video message must not fail the whole settings read.
+		let mut large = Vec::new();
+		message(1, &vec![0; MAX_STATUS_BYTES + 1], &mut large);
+		integer_wrapper(6, 900, &mut large);
+		let mut with_large = vec![10, 0];
+		message(5, &large, &mut with_large);
+		assert_eq!(
+			decode_response(&response(&with_large)).unwrap().afk_timeout,
 			Some(900)
 		);
 		for ignored in [0, 59, 3601] {

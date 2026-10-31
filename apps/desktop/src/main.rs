@@ -5356,8 +5356,15 @@ impl eframe::App for Desktop {
 			}
 			self.messaging.idle_timeout_status =
 				connection.idle_timeout_error.borrow().unwrap_or_default();
-			// Not during voice calls: the poller treats `None` as off.
-			let timeout = (self.messaging.auto_idle && self.state.voice.active.is_none())
+			// Not during voice calls (a failed call waiting to be dismissed is not one): the
+			// poller treats `None` as off.
+			let in_call = self
+				.state
+				.voice
+				.active
+				.as_ref()
+				.is_some_and(|call| call.phase != client_core::voice::Phase::Failed);
+			let timeout = (self.messaging.auto_idle && !in_call)
 				.then(|| Duration::from_secs(self.messaging.idle_timeout().into()));
 			connection
 				.auto_idle
